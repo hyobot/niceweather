@@ -27,11 +27,10 @@ def send_telegram(message):
 # =========================
 def get_market_data():
     try:
-        # FRED 데이터는 지연 공시되므로 넉넉히 2년치 조회
+        # FRED 데이터 기간 설정
         start_date = datetime.now() - timedelta(days=730) 
 
-        # 1. [실물 압력계] Corporate Profits After Tax (NIPA)
-        # FRED 코드: CPATAX (분기별 데이터)
+        # 1. [실물 압력계] Corporate Profits After Tax (NIPA) -> CPATAX
         cpatax = web.get_data_fred('CPATAX', start=start_date)
 
         # 2. [시장/심리 데이터]
@@ -43,17 +42,16 @@ def get_market_data():
         hy_spread = web.get_data_fred('BAMLH0A0HYM2', start=start_date) # 하이일드 스프레드
         unrate = web.get_data_fred('UNRATE', start=start_date) # 실업률
 
-        # 4. [단기 트리거] SPY Trailing EPS
-        # yfinance info는 실시간 메타데이터
+        # 4. [수정됨] 기관용 EPS 트리거 (Forward P/E vs Trailing P/E)
         try:
             spy_info = yf.Ticker("SPY").info
-            spy_trailing_eps = spy_info.get('trailingEps', 0)
-            spy_forward_eps = spy_info.get('forwardEps', 0)
+            forward_pe = spy_info.get("forwardPE", None)
+            trailing_pe = spy_info.get("trailingPE", None)
         except:
-            spy_trailing_eps = 0
-            spy_forward_eps = 0
+            forward_pe = None
+            trailing_pe = None
 
-        return cpatax, vix, spy, vrt, hy_spread, unrate, spy_trailing_eps, spy_forward_eps
+        return cpatax, vix, spy, vrt, hy_spread, unrate, forward_pe, trailing_pe
 
     except Exception as e:
         send_telegram(f"❌ 데이터 수집 오류: {e}")
@@ -65,7 +63,7 @@ def get_market_data():
 def analyze_season():
     try:
         # 데이터 로드
-        cpatax, vix, spy, vrt, hy, unrate, spy_t_eps, spy_f_eps = get_market_data()
+        cpatax, vix, spy, vrt, hy, unrate, fwd_pe, trail_pe = get_market_data()
 
         # 최신값 추출 (.item()으로 스칼라 변환)
         curr_vix = vix.iloc[-1].item()
@@ -74,10 +72,9 @@ def analyze_season():
         curr_vrt = vrt.iloc[-1].item()
         
         # ------------------------------------------------
-        # 1️⃣ [실물 압력계] CPATAX (계절 판독)
+        # 1️⃣ [실물 압력계] CPATAX (구조적 계절)
         # ------------------------------------------------
-        # 분기 데이터이므로 최근 3개 분기 비교
-        c0 = cpatax.iloc[-1].item() # 최신 분기
+        c0 = cpatax.iloc[-1].item() # 최신
         c1 = cpatax.iloc[-2].item() # 전 분기
         c2 = cpatax.iloc[-3].item() # 전전 분기
 
@@ -97,13 +94,21 @@ def analyze_season():
         first_snow = [] # 첫 눈 (경고)
         snowstorm = []  # 눈보라 (대피)
 
-        # (A) SPY EPS 트리거 (단기 이익 충격)
-        # Trailing(과거)보다 Forward(미래)가 낮으면 이익 전망 악화로 해석
+        # (A) [수정됨] EPS 전망 악화 트리거 (P/E 역전)
+        # Forward P/E가 Trailing P/E보다 높다면, 시장은 미래 이익 감소를 예상함
         eps_trigger = False
-        if spy_f_eps < spy_t_eps and spy_t_eps > 0:
-            first_snow.append(f"EPS 전망 악화 (Forward {spy_f_eps} < Trailing {spy_t_eps})")
-            eps_trigger = True
+        pe_status = "✅ 이익 성장 기대"
         
+        if fwd_pe and trail_pe:
+            if fwd_pe > trail_pe:
+                eps_trigger = True
+                pe_status = "⚠️ 이익 감소 우려 (역성장)"
+                first_snow.append(f"EPS 전망 악화 (Fwd P/E {fwd_pe:.1f} > Trail P/E {trail_pe:.1f})")
+            else:
+                pe_status = f"✅ 양호 (Fwd {fwd_pe:.1f} < Trail {trail_pe:.1f})"
+        else:
+            pe_status = "❓ 데이터 확인 불가"
+
         # (B) 가격/모멘텀 트리거
         spy_max = spy.max().item()
         if curr_spy < spy_max * 0.8:
@@ -127,7 +132,6 @@ def analyze_season():
         # ------------------------------------------------
         # 3️⃣ [최종 판결] 전염(Contagion) 여부
         # ------------------------------------------------
-        # 로직: 실물(겨울) + 심리(트리거) = 눈보라 확정
         verdict = ""
         
         if len(snowstorm) >= 1:
@@ -142,16 +146,15 @@ def analyze_season():
         # ------------------------------------------------
         # 4️⃣ [보고서 작성]
         # ------------------------------------------------
-        msg = f"""👑 *왕의 계기판 (EPS Ver.)* ({datetime.now().strftime('%Y-%m-%d')})
+        msg = f"""👑 *왕의 계기판 (Institutions Ver.)* ({datetime.now().strftime('%Y-%m-%d')})
 
 📊 *1. 실물 압력계 (CPATAX)*
 - 상태: {real_season}
 - 진단: {season_msg}
 
-📊 *2. 단기 이익 트리거 (SPY)*
-- Trailing EPS: ${spy_t_eps:.2f}
-- Forward EPS: ${spy_f_eps:.2f}
-- 상태: {"⚠️ 전망 악화" if eps_trigger else "✅ 양호"}
+📊 *2. EPS 트리거 (Valuation)*
+- 상태: {pe_status}
+  (Forward가 Trailing보다 높으면 이익 감소 신호)
 
 📊 *3. 시장 위험도*
 - VIX: {curr_vix:.2f}
