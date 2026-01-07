@@ -1,0 +1,4 @@
+yfinance
+pandas_datareader
+requests
+pandas
