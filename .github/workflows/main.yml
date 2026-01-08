@@ -3,7 +3,7 @@ name: Market Season Reporter
 on:
   schedule:
     # 매일 UTC 13:00 (한국 시간 22:00) 실행
-    - cron: '0 13 * * *'
+    - cron: '11 12 * * *'
   workflow_dispatch: # 수동 실행 버튼 활성화
 
 jobs:
