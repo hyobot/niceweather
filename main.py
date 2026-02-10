@@ -40,10 +40,15 @@ def send_telegram(message, parse_mode="Markdown"):
 def get_price_reaction(ticker, days=5):
     try:
         df = yf.download(ticker, period="1mo", progress=False)
+        # yfinance 데이터 구조 대응 (MultiIndex 등)
         if isinstance(df.columns, pd.MultiIndex):
-            close = df['Close'][ticker]
+            try:
+                close = df['Close'][ticker]
+            except KeyError:
+                close = df.xs(ticker, level=1, axis=1)['Close']
         else:
             close = df['Close']
+            
         returns = close.pct_change(days)
         return returns.iloc[-1]
     except Exception as e:
@@ -57,17 +62,18 @@ def get_macro_data():
         cpatax = web.get_data_fred('CPATAX', start=start_date)
         vix = yf.download('^VIX', period='1mo', progress=False)['Close']
         hy_spread = web.get_data_fred('BAMLH0A0HYM2', start=start_date)
-        unrate = web.get_data_fred('UNRATE', start=start_date)
-        return cpatax, vix, hy_spread, unrate
+        # unrate = web.get_data_fred('UNRATE', start=start_date) # UNRATE 가끔 에러 발생시 주석 처리
+        return cpatax, vix, hy_spread
     except Exception as e:
         print(f"Macro Data Error: {e}")
-        return None, None, None, None
+        return None, None, None
 
 def report_kings_dashboard():
     """왕의 계기판 보고서 생성 및 전송"""
     print(">>> [Part 1] 왕의 계기판 분석 시작...")
     try:
-        cpatax, vix, hy, unrate = get_macro_data()
+        # UNRATE 제외하고 3개만 받음 (안정성 위해)
+        cpatax, vix, hy = get_macro_data()
         
         if cpatax is None:
             send_telegram("❌ [왕의 계기판] 데이터 수집 실패")
@@ -126,7 +132,7 @@ def report_kings_dashboard():
 
     except Exception as e:
         print(f"Dashboard Error: {e}")
-        send_telegram(f"❌ 분석 중 오류: {e}")
+        # 에러 나도 2부 실행을 위해 여기서 멈추지 않음
 
 # ==============================================================================
 # [Part 2] 22개 종목 실시간 시세표 (HTML 포맷)
@@ -165,14 +171,28 @@ def report_22_tickers():
                 prev = hist['Close'].iloc[-2]
                 pct = ((curr - prev) / prev) * 100
             
-            # 국채 수익률 보정 (^TNX 등은 42.5 -> 4.25%로 표기됨)
-            # 하지만 사용자는 원본 수치를 원할 수 있으므로 값 자체는 유지하되
-            # 만약 %단위 변환이 필요하면 여기서 curr / 10 처리
-            
             symbol = "▲" if pct > 0 else "▼" if pct < 0 else "."
             
             # 포맷팅
             if curr > 1000:
                 p_str = f"{curr:,.0f}"
             else:
-                p_
+                p_str = f"{curr:,.2f}"
+                
+            lines.append(f"{name:<10} {p_str:>9} {symbol}{abs(pct):.1f}")
+            
+        except:
+            lines.append(f"{name:<10} {'Error':>9} {'-':>6}")
+
+    lines.append("-" * 28 + "</pre>")
+    
+    # HTML 모드로 전송
+    send_telegram("\n".join(lines), parse_mode="HTML")
+    print(">>> [Part 2] 전송 완료")
+
+# =========================
+# [실행] 메인 함수
+# =========================
+if __name__ == "__main__":
+    report_kings_dashboard() # 1부: 거시 지표 & 위험 신호
+    report_22_tickers()      # 2부: 22개 종목 시세표
