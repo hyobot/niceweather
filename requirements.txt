@@ -1,4 +1,5 @@
 yfinance
+pandas
 pandas_datareader
 requests
-pandas
+lxml
