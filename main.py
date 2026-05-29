@@ -54,6 +54,7 @@ MARKET_DATA = {
     "3. Global Indices": {
         "Euro Stoxx": "^STOXX50E",
         "Hang Seng": "^HSI",
+        "Kospi": "^KS11",
         "H-Share": "^HSCE",
         "Nikkei 225": "^N225",
     },
@@ -456,6 +457,7 @@ def plot_core_assets_trend(market_hist):
     core_items = [
         "S&P 500",
         "Nasdaq",
+        "Kospi",
         "Bitcoin",
         "Dollar Idx",
         "Gold",
