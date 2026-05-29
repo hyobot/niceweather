@@ -32,6 +32,10 @@ DASHBOARD_HISTORY_PATH = DATA_DIR / "dashboard_history.csv"
 TODAY = datetime.now().strftime("%Y-%m-%d")
 
 
+# =========================
+# [시장 데이터 목록]
+# =========================
+
 MARKET_DATA = {
     "1. Currencies & Crypto": {
         "Dollar Idx": "DX-Y.NYB",
@@ -64,12 +68,13 @@ MARKET_DATA = {
         "Copper": "HG=F",
         "Crude Oil": "CL=F",
         "Nat Gas": "NG=F",
+        "Nickel": "NICKEL=F",
     },
 }
 
 
 # =========================
-# [텔레그램]
+# [텔레그램 전송 함수]
 # =========================
 
 def send_telegram_text(message, parse_mode="HTML"):
@@ -118,7 +123,7 @@ def send_telegram_photo(image_path, caption=None):
 
 
 # =========================
-# [공통 유틸]
+# [공통 유틸 함수]
 # =========================
 
 def safe_float(value):
@@ -141,21 +146,32 @@ def save_csv(df, path):
 
 
 def get_close_series(ticker, period="2mo"):
-    df = yf.download(ticker, period=period, progress=False, auto_adjust=False)
+    try:
+        df = yf.download(
+            ticker,
+            period=period,
+            progress=False,
+            auto_adjust=False,
+            threads=False
+        )
 
-    if df.empty:
+        if df.empty:
+            return pd.Series(dtype=float)
+
+        if isinstance(df.columns, pd.MultiIndex):
+            try:
+                close = df["Close"][ticker]
+            except Exception:
+                close = df.xs(ticker, level=1, axis=1)["Close"]
+        else:
+            close = df["Close"]
+
+        close = close.dropna()
+        return close
+
+    except Exception as e:
+        print(f"get_close_series error: {ticker} / {e}")
         return pd.Series(dtype=float)
-
-    if isinstance(df.columns, pd.MultiIndex):
-        try:
-            close = df["Close"][ticker]
-        except Exception:
-            close = df.xs(ticker, level=1, axis=1)["Close"]
-    else:
-        close = df["Close"]
-
-    close = close.dropna()
-    return close
 
 
 def get_price_reaction(ticker, days=5):
@@ -163,7 +179,9 @@ def get_price_reaction(ticker, days=5):
         close = get_close_series(ticker, period="1mo")
         if len(close) <= days:
             return 0.0
+
         return float(close.pct_change(days).iloc[-1])
+
     except Exception as e:
         print(f"Error fetching {ticker}: {e}")
         return 0.0
@@ -191,64 +209,70 @@ def get_macro_data():
 def report_kings_dashboard():
     print(">>> [Part 1] 왕의 계기판 분석 시작...")
 
-    cpatax, vix, hy = get_macro_data()
+    try:
+        cpatax, vix, hy = get_macro_data()
 
-    if cpatax is None or vix is None or hy is None:
-        send_telegram_text("❌ [왕의 계기판] 데이터 수집 실패")
-        return None
+        if cpatax is None or vix is None or hy is None:
+            send_telegram_text("❌ [왕의 계기판] 데이터 수집 실패")
+            return pd.DataFrame()
 
-    curr_vix = safe_float(vix.iloc[-1])
-    curr_hy = safe_float(hy.iloc[-1])
+        if len(cpatax) < 3 or len(vix) < 1 or len(hy) < 1:
+            send_telegram_text("❌ [왕의 계기판] 데이터 부족")
+            return pd.DataFrame()
 
-    c0 = safe_float(cpatax.iloc[-1])
-    c1 = safe_float(cpatax.iloc[-2])
-    c2 = safe_float(cpatax.iloc[-3])
+        curr_vix = safe_float(vix.iloc[-1])
+        curr_hy = safe_float(hy.iloc[-1])
 
-    real_season = "여름"
-    season_msg = "이익 성장 지속"
+        c0 = safe_float(cpatax.iloc[-1])
+        c1 = safe_float(cpatax.iloc[-2])
+        c2 = safe_float(cpatax.iloc[-3])
 
-    if c0 < c1 < c2:
-        real_season = "겨울"
-        season_msg = "기업이익 2분기 연속 하락"
-    elif c0 < c1:
-        real_season = "가을"
-        season_msg = "기업이익 꺾임"
+        real_season = "여름"
+        season_msg = "이익 성장 지속"
 
-    first_snow = []
-    snowstorm = []
+        if c0 < c1 < c2:
+            real_season = "겨울"
+            season_msg = "기업이익 2분기 연속 하락"
+        elif c0 < c1:
+            real_season = "가을"
+            season_msg = "기업이익 꺾임"
 
-    target_assets = ["SPY", "QQQ", "VRT"]
-    earnings_bad = []
+        first_snow = []
+        snowstorm = []
 
-    for ticker in target_assets:
-        r = get_price_reaction(ticker, days=5)
-        if r < -0.03:
-            earnings_bad.append(f"{ticker} 급락 ({r * 100:.1f}%)")
+        target_assets = ["SPY", "QQQ", "VRT"]
+        earnings_bad = []
 
-    eps_contagion = len(earnings_bad) >= 2
+        for ticker in target_assets:
+            r = get_price_reaction(ticker, days=5)
+            if r < -0.03:
+                earnings_bad.append(f"{ticker} 급락 ({r * 100:.1f}%)")
 
-    if eps_contagion:
-        first_snow.append("EPS 전염 시작")
-        first_snow.extend(earnings_bad)
+        eps_contagion = len(earnings_bad) >= 2
 
-    if curr_hy is not None and curr_hy >= 5.5:
-        snowstorm.append(f"신용 스프레드 위험 ({curr_hy:.2f}%)")
+        if eps_contagion:
+            first_snow.append("EPS 전염 시작")
+            first_snow.extend(earnings_bad)
 
-    row = {
-        "date": TODAY,
-        "season": real_season,
-        "cpatax": c0,
-        "vix": curr_vix,
-        "hy_spread": curr_hy,
-        "eps_contagion": eps_contagion,
-    }
+        if curr_hy is not None and curr_hy >= 5.5:
+            snowstorm.append(f"신용 스프레드 위험 ({curr_hy:.2f}%)")
 
-    hist = load_csv(DASHBOARD_HISTORY_PATH)
-    hist = pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
-    hist = hist.drop_duplicates(subset=["date"], keep="last")
-    save_csv(hist, DASHBOARD_HISTORY_PATH)
+        row = {
+            "date": TODAY,
+            "season": real_season,
+            "cpatax": c0,
+            "vix": curr_vix,
+            "hy_spread": curr_hy,
+            "eps_contagion": eps_contagion,
+        }
 
-    msg = f"""
+        hist = load_csv(DASHBOARD_HISTORY_PATH)
+        hist = pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
+        hist = hist.drop_duplicates(subset=["date"], keep="last")
+        hist = hist.sort_values("date")
+        save_csv(hist, DASHBOARD_HISTORY_PATH)
+
+        msg = f"""
 👑 <b>왕의 계기판</b> ({TODAY})
 
 <b>1. 실물 압력계</b>
@@ -263,24 +287,32 @@ def report_kings_dashboard():
 - Spread: {curr_hy:.2f}%
 """
 
-    if first_snow:
-        msg += "\n❄️ <b>[경고] 첫 눈</b>\n"
-        msg += "\n".join(f"- {x}" for x in first_snow)
+        if first_snow:
+            msg += "\n❄️ <b>[경고] 첫 눈</b>\n"
+            msg += "\n".join(f"- {x}" for x in first_snow)
 
-    if snowstorm:
-        msg += "\n\n🌩️ <b>[위험] 눈보라</b>\n"
-        msg += "\n".join(f"- {x}" for x in snowstorm)
+        if snowstorm:
+            msg += "\n\n🌩️ <b>[위험] 눈보라</b>\n"
+            msg += "\n".join(f"- {x}" for x in snowstorm)
 
-    send_telegram_text(msg.strip(), parse_mode="HTML")
+        send_telegram_text(msg.strip(), parse_mode="HTML")
 
-    return hist
+        print(">>> [Part 1] 전송 완료")
+        return hist
+
+    except Exception as e:
+        print(f"Dashboard Error: {e}")
+        send_telegram_text(f"❌ [왕의 계기판] 오류 발생\n{e}")
+        return pd.DataFrame()
 
 
 # =========================
-# [Part 2] 시장 데이터 수집
+# [Part 2] 시장 데이터 수집 및 텍스트 보고서
 # =========================
 
 def collect_market_rows():
+    print(">>> [Part 2] 시장 데이터 수집 시작...")
+
     rows = []
 
     for category, tickers in MARKET_DATA.items():
@@ -296,7 +328,10 @@ def collect_market_rows():
 
                     if len(close) >= 2:
                         prev = safe_float(close.iloc[-2])
-                        chg_pct = ((price - prev) / prev) * 100 if prev else None
+                        if prev and price:
+                            chg_pct = ((price - prev) / prev) * 100
+                        else:
+                            chg_pct = None
                     else:
                         chg_pct = None
 
@@ -325,9 +360,13 @@ def collect_market_rows():
 
 def update_market_history(today_df):
     hist = load_csv(MARKET_HISTORY_PATH)
+
     hist = pd.concat([hist, today_df], ignore_index=True)
     hist = hist.drop_duplicates(subset=["date", "item", "ticker"], keep="last")
+    hist = hist.sort_values(["date", "category", "item"])
+
     save_csv(hist, MARKET_HISTORY_PATH)
+
     return hist
 
 
@@ -371,47 +410,19 @@ def report_market_text(today_df):
     lines.append("</pre>")
 
     send_telegram_text("\n".join(lines), parse_mode="HTML")
+    print(">>> [Part 2] 텍스트 보고서 전송 완료")
 
 
 # =========================
 # [Part 3] 그래프 생성
 # =========================
 
-def plot_dashboard_chart(dashboard_hist):
-    if dashboard_hist.empty or len(dashboard_hist) < 2:
-        return None
-
-    df = dashboard_hist.copy()
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date").tail(90)
-
-    fig, ax1 = plt.subplots(figsize=(10, 5))
-
-    ax1.plot(df["date"], df["vix"], marker="o", linewidth=2, label="VIX")
-    ax1.set_ylabel("VIX")
-    ax1.grid(True, alpha=0.3)
-
-    ax2 = ax1.twinx()
-    ax2.plot(df["date"], df["hy_spread"], marker="o", linewidth=2, label="HY Spread")
-    ax2.set_ylabel("HY Spread (%)")
-
-    plt.title("King's Dashboard: System Risk Trend")
-    fig.autofmt_xdate()
-
-    lines_1, labels_1 = ax1.get_legend_handles_labels()
-    lines_2, labels_2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper left")
-
-    path = CHART_DIR / "dashboard_risk.png"
-    plt.tight_layout()
-    plt.savefig(path, dpi=160)
-    plt.close()
-
-    return path
-
-
 def plot_daily_change_bar(today_df):
+    """
+    오늘 하루 자산별 등락률 막대그래프
+    """
     df = today_df.dropna(subset=["chg_pct"]).copy()
+
     if df.empty:
         return None
 
@@ -420,11 +431,13 @@ def plot_daily_change_bar(today_df):
     plt.figure(figsize=(10, 8))
     plt.barh(df["item"], df["chg_pct"])
     plt.axvline(0, linewidth=1)
+
     plt.title(f"Daily Change % Snapshot ({TODAY})")
     plt.xlabel("Change (%)")
     plt.grid(axis="x", alpha=0.3)
 
     path = CHART_DIR / "daily_change_bar.png"
+
     plt.tight_layout()
     plt.savefig(path, dpi=160)
     plt.close()
@@ -432,59 +445,143 @@ def plot_daily_change_bar(today_df):
     return path
 
 
-def plot_category_trend(market_hist):
+def plot_core_assets_trend(market_hist):
+    """
+    핵심 자산 30일 누적 추이
+    모든 자산을 첫날 = 100으로 정규화해서 비교
+    """
     if market_hist.empty:
-        return []
+        return None
+
+    core_items = [
+        "S&P 500",
+        "Nasdaq",
+        "Bitcoin",
+        "Dollar Idx",
+        "Gold",
+        "Crude Oil",
+        "VIX",
+        "US 10Y Yld",
+    ]
 
     df = market_hist.copy()
     df["date"] = pd.to_datetime(df["date"])
+    df = df[df["item"].isin(core_items)]
     df = df.sort_values("date")
 
-    paths = []
+    if df["date"].nunique() < 2:
+        print("핵심 자산 누적 그래프: 날짜가 2개 미만이라 생성 생략")
+        return None
 
-    for category in MARKET_DATA.keys():
-        part = df[df["category"] == category].copy()
+    pivot = df.pivot_table(
+        index="date",
+        columns="item",
+        values="price",
+        aggfunc="last"
+    ).sort_index()
 
-        if part["date"].nunique() < 2:
-            continue
+    pivot = pivot.tail(30)
+    pivot = pivot.dropna(axis=1, how="all")
 
-        pivot = part.pivot_table(
-            index="date",
-            columns="item",
-            values="price",
-            aggfunc="last"
-        ).sort_index()
+    if pivot.empty or len(pivot) < 2:
+        return None
 
-        pivot = pivot.tail(30)
-        pivot = pivot.dropna(axis=1, how="all")
+    normalized = pivot / pivot.iloc[0] * 100
 
-        if pivot.empty or len(pivot) < 2:
-            continue
+    plt.figure(figsize=(10, 6))
 
-        normalized = pivot / pivot.iloc[0] * 100
+    for col in normalized.columns:
+        plt.plot(
+            normalized.index,
+            normalized[col],
+            marker="o",
+            linewidth=2,
+            label=col
+        )
 
-        plt.figure(figsize=(10, 5))
+    plt.axhline(100, linewidth=1)
 
-        for col in normalized.columns:
-            plt.plot(normalized.index, normalized[col], marker="o", linewidth=2, label=col)
+    plt.title("Core Assets 30D Trend, Start = 100")
+    plt.ylabel("Normalized Price")
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=8)
+    plt.xticks(rotation=30)
 
-        plt.axhline(100, linewidth=1)
-        plt.title(f"{category} - 30D Normalized Trend")
-        plt.ylabel("Start = 100")
-        plt.grid(True, alpha=0.3)
-        plt.legend(fontsize=8)
-        plt.xticks(rotation=30)
+    path = CHART_DIR / "core_assets_30d_trend.png"
 
-        safe_name = category.replace(" ", "_").replace(".", "").replace("&", "and").replace("(", "").replace(")", "")
-        path = CHART_DIR / f"{safe_name}.png"
+    plt.tight_layout()
+    plt.savefig(path, dpi=160)
+    plt.close()
 
-        plt.tight_layout()
-        plt.savefig(path, dpi=160)
-        plt.close()
+    return path
 
-        paths.append(path)
 
-    return paths
+def plot_dashboard_chart(dashboard_hist):
+    """
+    VIX / HY Spread 시스템 위험 추이
+    """
+    if dashboard_hist.empty:
+        return None
+
+    df = dashboard_hist.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").tail(90)
+
+    if df["date"].nunique() < 2:
+        print("시스템 위험 그래프: 날짜가 2개 미만이라 생성 생략")
+        return None
+
+    if "vix" not in df.columns or "hy_spread" not in df.columns:
+        return None
+
+    df = df.dropna(subset=["vix", "hy_spread"])
+
+    if df.empty or len(df) < 2:
+        return None
+
+    fig, ax1 = plt.subplots(figsize=(10, 5))
+
+    ax1.plot(
+        df["date"],
+        df["vix"],
+        marker="o",
+        linewidth=2,
+        label="VIX"
+    )
+    ax1.set_ylabel("VIX")
+    ax1.grid(True, alpha=0.3)
+
+    ax2 = ax1.twinx()
+
+    ax2.plot(
+        df["date"],
+        df["hy_spread"],
+        marker="o",
+        linewidth=2,
+        label="HY Spread"
+    )
+    ax2.set_ylabel("HY Spread (%)")
+
+    plt.title("King's Dashboard: System Risk Trend")
+
+    fig.autofmt_xdate()
+
+    lines_1, labels_1 = ax1.get_legend_handles_labels()
+    lines_2, labels_2 = ax2.get_legend_handles_labels()
+
+    ax1.legend(
+        lines_1 + lines_2,
+        labels_1 + labels_2,
+        loc="upper left"
+    )
+
+    path = CHART_DIR / "dashboard_risk.png"
+
+    plt.tight_layout()
+    plt.savefig(path, dpi=160)
+    plt.close()
+
+    return path
 
 
 # =========================
@@ -492,22 +589,38 @@ def plot_category_trend(market_hist):
 # =========================
 
 if __name__ == "__main__":
+    # 1. 왕의 계기판 텍스트 + dashboard_history.csv 누적
     dashboard_hist = report_kings_dashboard()
 
+    # 2. 시장 데이터 수집 + market_history.csv 누적
     today_market_df = collect_market_rows()
     market_hist = update_market_history(today_market_df)
 
+    # 3. Global Market Brief 텍스트 전송
     report_market_text(today_market_df)
 
-    dashboard_chart = plot_dashboard_chart(dashboard_hist)
+    # 4. 그래프 생성
     daily_bar_chart = plot_daily_change_bar(today_market_df)
-    category_charts = plot_category_trend(market_hist)
+    core_assets_chart = plot_core_assets_trend(market_hist)
+    dashboard_chart = plot_dashboard_chart(dashboard_hist)
+
+    # 5. 그래프 전송
+    if daily_bar_chart:
+        send_telegram_photo(
+            daily_bar_chart,
+            "📊 오늘의 자산별 등락률"
+        )
+
+    if core_assets_chart:
+        send_telegram_photo(
+            core_assets_chart,
+            "📈 핵심 자산 30일 누적 추이"
+        )
 
     if dashboard_chart:
-        send_telegram_photo(dashboard_chart, "👑 왕의 계기판: 시스템 위험 추이")
+        send_telegram_photo(
+            dashboard_chart,
+            "👑 왕의 계기판: 시스템 위험 추이"
+        )
 
-    if daily_bar_chart:
-        send_telegram_photo(daily_bar_chart, "📊 오늘의 자산별 등락률")
-
-    for chart in category_charts:
-        send_telegram_photo(chart, "📈 30일 정규화 추이")
+    print(">>> 전체 작업 완료")
